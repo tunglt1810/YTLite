@@ -31,7 +31,21 @@ static NSString *GetCacheSize() {
     NSUInteger insertIndex = [order indexOfObject:@(1)];
     if (insertIndex != NSNotFound)
         [mutableOrder insertObject:@(YTLiteSection) atIndex:insertIndex + 1];
+    else
+        [mutableOrder addObject:@(YTLiteSection)];
     return mutableOrder;
+}
+%end
+
+%hook YTSettingsGroupData
+- (NSArray *)orderedCategoriesForGroupType:(NSUInteger)type {
+    NSArray *categories = %orig;
+    if (![categories containsObject:@(YTLiteSection)]) {
+        NSMutableArray *mutableCategories = [categories mutableCopy];
+        [mutableCategories addObject:@(YTLiteSection)];
+        return mutableCategories;
+    }
+    return categories;
 }
 %end
 
@@ -621,8 +635,8 @@ static NSString *GetCacheSize() {
     [sectionItems addObject:version];
 
     BOOL isNew = [settingsViewController respondsToSelector:@selector(setSectionItems:forCategory:title:icon:titleDescription:headerHidden:)];
-    isNew ? [settingsViewController setSectionItems:sectionItems forCategory:YTLiteSection title:@"YTLite" icon:nil titleDescription:nil headerHidden:NO]
-          : [settingsViewController setSectionItems:sectionItems forCategory:YTLiteSection title:@"YTLite" titleDescription:nil headerHidden:NO];
+    isNew ? [settingsViewController setSectionItems:sectionItems forCategory:YTLiteSection title:@"YouTube Plus" icon:nil titleDescription:nil headerHidden:NO]
+          : [settingsViewController setSectionItems:sectionItems forCategory:YTLiteSection title:@"YouTube Plus" titleDescription:nil headerHidden:NO];
 
 }
 

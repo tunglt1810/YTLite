@@ -53,7 +53,7 @@ on:
 
       display_name:
         description: "App Name (Optional)"
-        default: "YouTube"
+        default: "YouTubePlus"
         required: true
         type: string
 
@@ -118,11 +118,44 @@ jobs:
 
       - name: Inject tweaks into IPA
         run: |
-          tweaks="ytplus.deb OpenYoutubeSafariExtension.appex"
+          tweaks="OpenYoutubeSafariExtension.appex"
           for f in *.deb; do
             [ -f "$f" ] && tweaks="$tweaks $f"
           done
-          cyan -i youtube.ipa -o YouTubePlus_Beta.ipa -uwef $tweaks -n "${{ github.event.inputs.display_name }}" -b ${{ github.event.inputs.bundle_id }}
+          cyan -i youtube.ipa -o YouTubePlus_Beta.ipa -uwsef $tweaks -n "${{ github.event.inputs.display_name }}" -b ${{ github.event.inputs.bundle_id }}
+
+      - name: Verify and Re-sign Frameworks
+        run: |
+          mkdir -p .tmp_verify
+          unzip -q YouTubePlus_Beta.ipa -d .tmp_verify
+          app_path=$(find .tmp_verify/Payload -maxdepth 1 -name "*.app")
+          
+          if [ -d "$app_path/Frameworks" ]; then
+            for fw in "$app_path/Frameworks"/*.framework; do
+              if [ -d "$fw" ]; then
+                echo "[*] Signing framework bundle $fw"
+                codesign -f -s - "$fw" || ldid -S "$fw"
+              fi
+            done
+            for dylib in "$app_path/Frameworks"/*.dylib; do
+              if [ -f "$dylib" ]; then
+                echo "[*] Signing $dylib"
+                codesign -f -s - "$dylib" || ldid -S "$dylib"
+              fi
+            done
+          fi
+          
+          app_bin="$app_path/$(basename "$app_path" .app)"
+          if [ -f "$app_bin" ]; then
+            echo "[*] Signing main executable and app bundle"
+            codesign -f -s - "$app_bin" || ldid -S "$app_bin"
+            codesign -f -s - "$app_path" 2>/dev/null || true
+          fi
+          
+          rm -f YouTubePlus_Beta.ipa
+          (cd .tmp_verify && zip -qr "../YouTubePlus_Beta.ipa" Payload)
+          rm -rf .tmp_verify
+          echo "[+] Successfully verified and signed all binaries in IPA"
 
       - name: Upload to GitHub Releases
         uses: softprops/action-gh-release@v3

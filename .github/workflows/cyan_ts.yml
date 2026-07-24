@@ -59,7 +59,7 @@ on:
 
       display_name:
         description: "App Name (Optional)"
-        default: "YouTube"
+        default: "YouTubePlus"
         required: true
         type: string
 
@@ -115,11 +115,11 @@ jobs:
       - name: Generate .cyan file
         if: ${{ github.event.inputs.create_cyan }}
         run: |
-          tweaks="ytplus.deb OpenYoutubeSafariExtension.appex"
+          tweaks="OpenYoutubeSafariExtension.appex"
           for f in *.deb; do
             [ -f "$f" ] && tweaks="$tweaks $f"
           done
-          cgen -uwef $tweaks -n "${{ github.event.inputs.display_name }}" -b ${{ github.event.inputs.bundle_id }} -o cyan_YouTubePlus_${{ github.event.inputs.tweak_version }}.cyan
+          cgen -uwsef $tweaks -n "${{ github.event.inputs.display_name }}" -b ${{ github.event.inputs.bundle_id }} -o cyan_YouTubePlus_${{ github.event.inputs.tweak_version }}.cyan
 
       - name: Generate .zip file for TrollFools
         if: ${{ github.event.inputs.create_tf }}

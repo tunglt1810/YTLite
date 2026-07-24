@@ -14,9 +14,33 @@ static UIImage *YTImageNamed(NSString *imageName) {
 - (BOOL)playableInBackground { return ytlBool(@"backgroundPlayback") ? YES : NO; }
 %end
 
+%hook YTColdConfig
+- (BOOL)isBackgroundPlaybackEnabled { return ytlBool(@"backgroundPlayback") ? YES : %orig; }
+- (BOOL)isBackgroundPlaybackAllowed { return ytlBool(@"backgroundPlayback") ? YES : %orig; }
+- (BOOL)enableBackgroundable { return ytlBool(@"backgroundPlayback") ? YES : %orig; }
+- (BOOL)mainAppCoreClientEnableCairoSettings { return NO; }
+%end
+
+%hook YTPlaybackData
+- (BOOL)isPlayableInBackground { return ytlBool(@"backgroundPlayback") ? YES : %orig; }
+%end
+
+%hook YTSingleVideoController
+- (void)playerStatusDidChange:(id)arg1 {
+    %orig;
+    if (ytlBool(@"backgroundPlayback")) {
+        [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback error:nil];
+        [[AVAudioSession sharedInstance] setActive:YES error:nil];
+        [[UIApplication sharedApplication] beginReceivingRemoteControlEvents];
+    }
+}
+%end
+
 // Disable Ads
 %hook YTIPlayerResponse
 - (BOOL)isMonetized { return ytlBool(@"noAds") ? NO : YES; }
+- (id)adPlacements { return ytlBool(@"noAds") ? nil : %orig; }
+- (id)playerAds { return ytlBool(@"noAds") ? nil : %orig; }
 %end
 
 %hook YTDataUtils
@@ -32,15 +56,30 @@ static UIImage *YTImageNamed(NSString *imageName) {
 - (void)decorateContext:(id)context { if (!ytlBool(@"noAds")) %orig; }
 %end
 
+// Fix Download Button Premium Popup on YouTube 21.34.3
+%hook YTOfflineVideoEndpointCommandHandlerImpl
+- (void)executeWithCommand:(id)command entry:(id)entry fromView:(id)fromView {
+    return;
+}
+%end
+
+%hook YTOfflineVideoEndpointCommandHandler
+- (void)executeWithCommand:(id)command entry:(id)entry fromView:(id)fromView {
+    return;
+}
+%end
+
 %hook YTIElementRenderer
 - (NSData *)elementData {
-    if (self.hasCompatibilityOptions && self.compatibilityOptions.hasAdLoggingData && ytlBool(@"noAds")) return nil;
-
     NSString *description = [self description];
 
-    NSArray *ads = @[@"brand_promo", @"product_carousel", @"product_engagement_panel", @"product_item", @"text_search_ad", @"text_image_button_layout", @"carousel_headered_layout", @"carousel_footered_layout", @"square_image_layout", @"landscape_image_wide_button_layout", @"feed_ad_metadata"];
-    if (ytlBool(@"noAds") && [ads containsObject:description]) {
-        return [NSData data];
+    NSArray *ads = @[@"brand_promo", @"product_carousel", @"product_engagement_panel", @"product_item", @"text_search_ad", @"text_image_button_layout", @"carousel_headered_layout", @"carousel_footered_layout", @"square_image_layout", @"landscape_image_wide_button_layout", @"feed_ad_metadata", @"promoted_sparkles", @"statement_banner", @"ad_placement", @"shelf_ad", @"inline_ad", @"banner_ad", @"prime_info", @"ad_layout", @"brand_promo_cell"];
+    if (ytlBool(@"noAds")) {
+        for (NSString *ad in ads) {
+            if ([description containsString:ad]) {
+                return [NSData data];
+            }
+        }
     }
 
     NSArray *shortsToRemove = @[@"shorts_shelf.eml", @"shorts_video_cell.eml", @"6Shorts"];
@@ -60,6 +99,10 @@ static UIImage *YTImageNamed(NSString *imageName) {
         NSMutableArray <YTISectionListSupportedRenderers *> *contentsArray = model.contentsArray;
         NSIndexSet *removeIndexes = [contentsArray indexesOfObjectsPassingTest:^BOOL(YTISectionListSupportedRenderers *renderers, NSUInteger idx, BOOL *stop) {
             YTIItemSectionRenderer *sectionRenderer = renderers.itemSectionRenderer;
+            NSString *desc = [sectionRenderer description];
+            if ([desc containsString:@"ad_"] || [desc containsString:@"Promoted"] || [desc containsString:@"promoted"] || [desc containsString:@"BrandPromo"]) {
+                return YES;
+            }
             YTIItemSectionSupportedRenderers *firstObject = [sectionRenderer.contentsArray firstObject];
             return firstObject.hasPromotedVideoRenderer || firstObject.hasCompactPromotedVideoRenderer || firstObject.hasPromotedVideoInlineMutedRenderer;
         }];
@@ -1381,6 +1424,8 @@ static NSURL *newCoverURL(NSURL *originalURL) {
 // %end
 
 %ctor {
+    %init;
+
     if (ytlBool(@"shortsOnlyMode") && (ytlBool(@"removeShorts") || ytlBool(@"reExplore"))) {
         ytlSetBool(NO, @"removeShorts");
         ytlSetBool(NO, @"reExplore");
