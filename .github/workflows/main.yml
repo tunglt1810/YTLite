@@ -39,6 +39,12 @@ on:
         required: true
         default: false
 
+      build_from_source:
+        description: "Build YTLite from local source code (Full Features, No Subscription)"
+        type: boolean
+        required: true
+        default: true
+
       ipa_url:
         description: "URL to the decrypted IPA file"
         default: ""
@@ -77,6 +83,7 @@ jobs:
   build-tweaks:
     uses: ./.github/workflows/_build_tweaks.yml
     with:
+      build_from_source: ${{ inputs.build_from_source }}
       enable_youpip: ${{ inputs.enable_youpip }}
       enable_ytuhd: ${{ inputs.enable_ytuhd }}
       enable_yq: ${{ inputs.enable_yq }}
