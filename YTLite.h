@@ -5,6 +5,7 @@
 #import "Utils/NSBundle+YTLite.h"
 #import "Utils/YTLUserDefaults.h"
 #import "Utils/Reachability.h"
+#import "Utils/YTLDownloadManager.h"
 #import "YouTubeHeaders.h"
 
 #define LOC(key) [NSBundle ytl_localizedStringForKey:key]
@@ -102,8 +103,27 @@
 @property (nonatomic, copy, readwrite) NSString *shortDescription;
 @end
 
+@interface YTIFormatStream : NSObject
+@property (nonatomic, copy, readwrite) NSString *URL;
+@property (nonatomic, copy, readwrite) NSString *qualityLabel;
+@property (nonatomic, copy, readwrite) NSString *mimeType;
+@property (nonatomic, assign, readwrite) int itag;
+@property (nonatomic, assign, readwrite) int width;
+@property (nonatomic, assign, readwrite) int height;
+@property (nonatomic, assign, readwrite) long long contentLength;
+@property (nonatomic, copy, readwrite) NSString *audioQuality;
+@end
+
+@interface YTIStreamingData : NSObject
+- (NSString *)hlsManifestURL;
+- (NSString *)dashManifestURL;
+- (NSArray <YTIFormatStream *> *)formatsArray;
+- (NSArray <YTIFormatStream *> *)adaptiveFormatsArray;
+@end
+
 @interface YTIPlayerResponse : NSObject
 @property (nonatomic, assign, readonly) YTIVideoDetails *videoDetails;
+- (YTIStreamingData *)streamingData;
 @end
 
 @interface YTPlayerResponse : NSObject
@@ -246,9 +266,7 @@
 @end
 
 @interface ASDisplayNode ()
-@property (nonatomic, assign, readonly) UIViewController *closestViewController;
 @property (atomic, assign, readonly) ASNodeAncestryEnumerator *supernodes;
-// @property (atomic, copy, readwrite) NSArray *yogaChildren;
 @property (atomic) CALayer *layer;
 @end
 

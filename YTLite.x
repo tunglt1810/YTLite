@@ -4,6 +4,8 @@ static UIImage *YTImageNamed(NSString *imageName) {
     return [UIImage imageNamed:imageName inBundle:[NSBundle mainBundle] compatibleWithTraitCollection:nil];
 }
 
+static __weak YTPlayerViewController *gCurrentPlayerVC = nil;
+
 // YouTube-X (https://github.com/PoomSmart/YouTube-X/)
 // Background Playback
 %hook YTIPlayabilityStatus
@@ -56,16 +58,35 @@ static UIImage *YTImageNamed(NSString *imageName) {
 - (void)decorateContext:(id)context { if (!ytlBool(@"noAds")) %orig; }
 %end
 
-// Fix Download Button Premium Popup on YouTube 21.34.3
+// Download Manager: Intercept YouTube's native offline commands
 %hook YTOfflineVideoEndpointCommandHandlerImpl
 - (void)executeWithCommand:(id)command entry:(id)entry fromView:(id)fromView {
-    return;
+    if (ytlBool(@"downloadManager")) {
+        [[%c(YTLDownloadManager) sharedManager] showDownloadMenuFromView:fromView playerViewController:gCurrentPlayerVC];
+        return;
+    }
+    %orig;
 }
 %end
 
 %hook YTOfflineVideoEndpointCommandHandler
 - (void)executeWithCommand:(id)command entry:(id)entry fromView:(id)fromView {
-    return;
+    if (ytlBool(@"downloadManager")) {
+        [[%c(YTLDownloadManager) sharedManager] showDownloadMenuFromView:fromView playerViewController:gCurrentPlayerVC];
+        return;
+    }
+    %orig;
+}
+%end
+
+// Download Manager: Intercept native offline quality selection alert (preventing Premium popup)
+%hook YTOfflineQualitySelectionAlertView
+- (void)show {
+    if (ytlBool(@"downloadManager")) {
+        [[%c(YTLDownloadManager) sharedManager] showDownloadMenuFromView:nil playerViewController:gCurrentPlayerVC];
+        return;
+    }
+    %orig;
 }
 %end
 
@@ -469,8 +490,14 @@ void autoSkipShorts(YTPlayerViewController *self, YTSingleVideoController *video
 }
 
 %hook YTPlayerViewController
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    gCurrentPlayerVC = self;
+}
+
 - (void)loadWithPlayerTransition:(id)arg1 playbackConfig:(id)arg2 {
     %orig;
+    gCurrentPlayerVC = self;
 
     if (ytlInt(@"wiFiQualityIndex") != 0 || ytlInt(@"cellQualityIndex") != 0) [self performSelector:@selector(autoQuality) withObject:nil afterDelay:1.0];
     if (ytlBool(@"autoFullscreen")) [self performSelector:@selector(autoFullscreen) withObject:nil afterDelay:0.75];
@@ -961,6 +988,18 @@ static void genImageFromLayer(CALayer *layer, UIColor *backgroundColor, void (^c
 %end
 
 %hook ASDisplayNode
+- (void)didLoad {
+    %orig;
+    if (ytlBool(@"downloadManager") && [self.accessibilityIdentifier isEqualToString:@"id.ui.add_to.offline.button"]) {
+        UIView *v = self.view;
+        if (v) {
+            UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[%c(YTLDownloadManager) sharedManager] action:@selector(handleDownloadButtonTap:)];
+            tap.cancelsTouchesInView = YES;
+            [v addGestureRecognizer:tap];
+        }
+    }
+}
+
 - (void)setFrame:(CGRect)frame {
     %orig;
 
@@ -1030,6 +1069,17 @@ static void genImageFromLayer(CALayer *layer, UIColor *backgroundColor, void (^c
 %hook _ASDisplayView
 - (void)setKeepalive_node:(id)arg1 {
     %orig;
+
+    if (ytlBool(@"downloadManager")) {
+        ASDisplayNode *node = (ASDisplayNode *)self.keepalive_node;
+        if ([node.accessibilityIdentifier isEqualToString:@"id.ui.add_to.offline.button"] ||
+            [self.accessibilityIdentifier isEqualToString:@"id.ui.add_to.offline.button"] ||
+            [[self description] containsString:@"id.ui.add_to.offline.button"]) {
+            UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[%c(YTLDownloadManager) sharedManager] action:@selector(handleDownloadButtonTap:)];
+            tap.cancelsTouchesInView = YES;
+            [self addGestureRecognizer:tap];
+        }
+    }
 
     NSArray *gesturesInfo = @[
         @{@"selector": @"postManager:", @"text": @"id.ui.backstage.original_post", @"key": @(ytlBool(@"postManager"))},
