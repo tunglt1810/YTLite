@@ -21,12 +21,11 @@
 
 #include <UIKit/UIActivityViewController.h>
 
-#import "../YouTubeHeader/YTUIUtils.h"
-
-#import "../protobuf/objectivec/GPBDescriptor.h"
-#import "../protobuf/objectivec/GPBMessage.h"
-#import "../protobuf/objectivec/GPBUnknownField.h"
-#import "../protobuf/objectivec/GPBUnknownFieldSet.h"
+#import <YouTubeHeader/YTUIUtils.h>
+#import <YouTubeHeader/GPBDescriptor.h>
+#import <YouTubeHeader/GPBMessage.h>
+#import <YouTubeHeader/GPBUnknownField.h>
+#import <YouTubeHeader/GPBUnknownFieldSet.h>
 
 #define ytlBool(key)  [[[NSUserDefaults alloc] initWithSuiteName:@"com.dvntm.ytlite"] boolForKey:key]
 
@@ -63,10 +62,8 @@ typedef NS_ENUM(NSInteger, ShareEntityType) {
 };
 
 static inline NSString* extractIdWithFormat(GPBUnknownFieldSet *fields, NSInteger fieldNumber, NSString *format) {
-    if (![fields hasField:fieldNumber])
-        return nil;
-    GPBUnknownField *idField = [fields getField:fieldNumber];
-    if ([idField.lengthDelimitedList count] != 1)
+    GPBUnknownField *idField = [fields getField:(int32_t)fieldNumber];
+    if (!idField || [idField.lengthDelimitedList count] != 1)
         return nil;
     NSString *id = [[NSString alloc] initWithData:[idField.lengthDelimitedList firstObject] encoding:NSUTF8StringEncoding];
     return [NSString stringWithFormat:format, id];
@@ -94,8 +91,8 @@ static inline NSString* extractIdWithFormat(GPBUnknownFieldSet *fields, NSIntege
     GPBUnknownFieldSet *fields = shareEntity.unknownFields;
     NSString *shareUrl;
 
-    if ([fields hasField:ShareEntityFieldClip]) {
-        GPBUnknownField *shareEntityClip = [fields getField:ShareEntityFieldClip];
+    GPBUnknownField *shareEntityClip = [fields getField:ShareEntityFieldClip];
+    if (shareEntityClip) {
         if ([shareEntityClip.lengthDelimitedList count] != 1)
             return %orig;
         GPBMessage *clipMessage = [%c(GPBMessage) parseFromData:[shareEntityClip.lengthDelimitedList firstObject] error:nil];
