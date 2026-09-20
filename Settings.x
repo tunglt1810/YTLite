@@ -31,7 +31,21 @@ static NSString *GetCacheSize() {
     NSUInteger insertIndex = [order indexOfObject:@(1)];
     if (insertIndex != NSNotFound)
         [mutableOrder insertObject:@(YTLiteSection) atIndex:insertIndex + 1];
+    else
+        [mutableOrder addObject:@(YTLiteSection)];
     return mutableOrder;
+}
+%end
+
+%hook YTSettingsGroupData
+- (NSArray *)orderedCategoriesForGroupType:(NSUInteger)type {
+    NSArray *categories = %orig;
+    if (![categories containsObject:@(YTLiteSection)]) {
+        NSMutableArray *mutableCategories = [categories mutableCopy];
+        [mutableCategories addObject:@(YTLiteSection)];
+        return mutableCategories;
+    }
+    return categories;
 }
 %end
 
@@ -125,7 +139,8 @@ static NSString *GetCacheSize() {
         selectBlock:^BOOL (YTSettingsCell *cell, NSUInteger arg1) {
             NSArray <YTSettingsSectionItem *> *rows = @[
             [self switchWithTitle:@"RemoveAds" key:@"noAds"],
-            [self switchWithTitle:@"BackgroundPlayback" key:@"backgroundPlayback"]
+            [self switchWithTitle:@"BackgroundPlayback" key:@"backgroundPlayback"],
+            [self switchWithTitle:@"DownloadManager" key:@"downloadManager"]
         ];
 
         YTSettingsPickerViewController *picker = [[%c(YTSettingsPickerViewController) alloc] initWithNavTitle:LOC(@"General") pickerSectionTitle:nil rows:rows selectedItemIndex:NSNotFound parentResponder:[self parentResponder]];
@@ -231,6 +246,23 @@ static NSString *GetCacheSize() {
         }];
 
         [sectionItems addObject:player];
+
+        YTSettingsSectionItem *downloading = [YTSettingsSectionItemClass itemWithTitle:LOC(@"Downloading")
+        accessibilityIdentifier:@"YTLiteSectionItem"
+        detailTextBlock:^NSString *() {
+            return @"‣";
+        }
+        selectBlock:^BOOL (YTSettingsCell *cell, NSUInteger arg1) {
+            NSArray <YTSettingsSectionItem *> *rows = @[
+                [self switchWithTitle:@"DownloadManager" key:@"downloadManager"]
+            ];
+
+            YTSettingsPickerViewController *picker = [[%c(YTSettingsPickerViewController) alloc] initWithNavTitle:LOC(@"Downloading") pickerSectionTitle:nil rows:rows selectedItemIndex:NSNotFound parentResponder:[self parentResponder]];
+            [settingsViewController pushViewController:picker];
+            return YES;
+        }];
+
+        [sectionItems addObject:downloading];
 
         YTSettingsSectionItem *shorts = [YTSettingsSectionItemClass itemWithTitle:LOC(@"Shorts")
         accessibilityIdentifier:@"YTLiteSectionItem"
@@ -621,8 +653,8 @@ static NSString *GetCacheSize() {
     [sectionItems addObject:version];
 
     BOOL isNew = [settingsViewController respondsToSelector:@selector(setSectionItems:forCategory:title:icon:titleDescription:headerHidden:)];
-    isNew ? [settingsViewController setSectionItems:sectionItems forCategory:YTLiteSection title:@"YTLite" icon:nil titleDescription:nil headerHidden:NO]
-          : [settingsViewController setSectionItems:sectionItems forCategory:YTLiteSection title:@"YTLite" titleDescription:nil headerHidden:NO];
+    isNew ? [settingsViewController setSectionItems:sectionItems forCategory:YTLiteSection title:@"YouTube Plus" icon:nil titleDescription:nil headerHidden:NO]
+          : [settingsViewController setSectionItems:sectionItems forCategory:YTLiteSection title:@"YouTube Plus" titleDescription:nil headerHidden:NO];
 
 }
 

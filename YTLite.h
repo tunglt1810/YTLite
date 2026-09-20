@@ -1,12 +1,15 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
+#import <objc/runtime.h>
 #import <Photos/Photos.h>
+#import <AVFoundation/AVFoundation.h>
 #import "Utils/NSBundle+YTLite.h"
 #import "Utils/YTLUserDefaults.h"
 #import "Utils/Reachability.h"
+#import "Utils/YTLDownloadManager.h"
 #import "YouTubeHeaders.h"
 
-#define LOC(key) [NSBundle.ytl_defaultBundle localizedStringForKey:key value:nil table:nil]
+#define LOC(key) [NSBundle ytl_localizedStringForKey:key]
 
 #define ytlBool(key) [[YTLUserDefaults standardUserDefaults] boolForKey:key]
 #define ytlInt(key) [[YTLUserDefaults standardUserDefaults] integerForKey:key]
@@ -101,8 +104,27 @@
 @property (nonatomic, copy, readwrite) NSString *shortDescription;
 @end
 
+@interface YTIFormatStream : NSObject
+@property (nonatomic, copy, readwrite) NSString *URL;
+@property (nonatomic, copy, readwrite) NSString *qualityLabel;
+@property (nonatomic, copy, readwrite) NSString *mimeType;
+@property (nonatomic, assign, readwrite) int itag;
+@property (nonatomic, assign, readwrite) int width;
+@property (nonatomic, assign, readwrite) int height;
+@property (nonatomic, assign, readwrite) long long contentLength;
+@property (nonatomic, copy, readwrite) NSString *audioQuality;
+@end
+
+@interface YTIStreamingData : NSObject
+- (NSString *)hlsManifestURL;
+- (NSString *)dashManifestURL;
+- (NSArray <YTIFormatStream *> *)formatsArray;
+- (NSArray <YTIFormatStream *> *)adaptiveFormatsArray;
+@end
+
 @interface YTIPlayerResponse : NSObject
 @property (nonatomic, assign, readonly) YTIVideoDetails *videoDetails;
+- (YTIStreamingData *)streamingData;
 @end
 
 @interface YTPlayerResponse : NSObject
@@ -136,6 +158,7 @@
 @property (nonatomic, weak, readwrite) UIViewController *parentViewController;
 @property (nonatomic, weak, readwrite) UIViewController *UIDelegate;
 @property (nonatomic, readonly) NSString *contentVideoID;
+@property (nonatomic, readonly) NSString *currentVideoID;
 - (void)setActiveCaptionTrack:(id)track;
 - (void)setPlaybackRate:(CGFloat)rate;
 - (void)shortsToRegular;
@@ -245,9 +268,7 @@
 @end
 
 @interface ASDisplayNode ()
-@property (nonatomic, assign, readonly) UIViewController *closestViewController;
 @property (atomic, assign, readonly) ASNodeAncestryEnumerator *supernodes;
-// @property (atomic, copy, readwrite) NSArray *yogaChildren;
 @property (atomic) CALayer *layer;
 @end
 
@@ -347,4 +368,12 @@
 + (instancetype)sheetControllerWithParentResponder:(id)parentResponder forcedSheetStyle:(NSInteger)style;
 + (instancetype)sheetControllerWithMessage:(NSString *)message delegate:(id)delegate parentResponder:(id)parentResponder;
 + (instancetype)sheetControllerWithMessage:(NSString *)message subMessage:(NSString *)subMessage delegate:(id)delegate parentResponder:(id)parentResponder;
+@property (nonatomic, strong, readwrite) NSMutableArray *actions;
+@end
+
+@interface YTOfflineVideoQualitySelectorViewController : UIViewController
+@end
+
+@interface YTOfflineQualitySelectionAlertView : UIView
+- (void)show;
 @end

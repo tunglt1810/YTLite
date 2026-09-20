@@ -4,6 +4,8 @@ static UIImage *YTImageNamed(NSString *imageName) {
     return [UIImage imageNamed:imageName inBundle:[NSBundle mainBundle] compatibleWithTraitCollection:nil];
 }
 
+static __weak YTPlayerViewController *gCurrentPlayerVC = nil;
+
 // YouTube-X (https://github.com/PoomSmart/YouTube-X/)
 // Background Playback
 %hook YTIPlayabilityStatus
@@ -14,9 +16,91 @@ static UIImage *YTImageNamed(NSString *imageName) {
 - (BOOL)playableInBackground { return ytlBool(@"backgroundPlayback") ? YES : NO; }
 %end
 
+%hook YTColdConfig
+- (BOOL)isBackgroundPlaybackEnabled { return ytlBool(@"backgroundPlayback") ? YES : %orig; }
+- (BOOL)isBackgroundPlaybackAllowed { return ytlBool(@"backgroundPlayback") ? YES : %orig; }
+- (BOOL)enableBackgroundable { return ytlBool(@"backgroundPlayback") ? YES : %orig; }
+- (BOOL)mainAppCoreClientEnableCairoSettings { return NO; }
+%end
+
+%hook YTPlaybackData
+- (BOOL)isPlayableInBackground { return ytlBool(@"backgroundPlayback") ? YES : %orig; }
+%end
+
+%hook YTSingleVideoController
+- (void)playerStatusDidChange:(id)arg1 {
+    %orig;
+    if (ytlBool(@"backgroundPlayback")) {
+        [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback error:nil];
+        [[AVAudioSession sharedInstance] setActive:YES error:nil];
+        [[UIApplication sharedApplication] beginReceivingRemoteControlEvents];
+    }
+    if (ytlBool(@"downloadManager")) {
+        @try {
+            id pr = nil;
+            if ([self respondsToSelector:@selector(playerResponse)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                pr = [self performSelector:@selector(playerResponse)];
+                #pragma clang diagnostic pop
+            } else if ([self respondsToSelector:@selector(contentPlayerResponse)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                pr = [self performSelector:@selector(contentPlayerResponse)];
+                #pragma clang diagnostic pop
+            }
+            if (!pr) pr = [self valueForKey:@"playerResponse"] ?: [self valueForKey:@"contentPlayerResponse"];
+
+            id pd = nil;
+            if ([self respondsToSelector:@selector(playbackData)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                pd = [self performSelector:@selector(playbackData)];
+                #pragma clang diagnostic pop
+            } else if ([self respondsToSelector:@selector(videoData)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                pd = [self performSelector:@selector(videoData)];
+                #pragma clang diagnostic pop
+            }
+            if (!pd) pd = [self valueForKey:@"playbackData"] ?: [self valueForKey:@"videoData"];
+
+            NSString *vid = nil;
+            if ([self respondsToSelector:@selector(videoID)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                vid = [self performSelector:@selector(videoID)];
+                #pragma clang diagnostic pop
+            } else if ([self respondsToSelector:@selector(videoId)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                vid = [self performSelector:@selector(videoId)];
+                #pragma clang diagnostic pop
+            }
+            if (!vid) vid = [self valueForKey:@"videoID"] ?: [self valueForKey:@"videoId"];
+
+            id v = nil;
+            if ([self respondsToSelector:@selector(singleVideo)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                v = [self performSelector:@selector(singleVideo)];
+                #pragma clang diagnostic pop
+            }
+            if (!v) v = [self valueForKey:@"singleVideo"] ?: [self valueForKey:@"activeVideo"];
+
+            if (pr || pd || vid || v) {
+                [[%c(YTLDownloadManager) sharedManager] didActivateVideo:v withPlaybackData:pd videoID:vid playerResponse:pr];
+            }
+        } @catch (NSException *e) {}
+    }
+}
+%end
+
 // Disable Ads
 %hook YTIPlayerResponse
 - (BOOL)isMonetized { return ytlBool(@"noAds") ? NO : YES; }
+- (id)adPlacements { return ytlBool(@"noAds") ? nil : %orig; }
+- (id)playerAds { return ytlBool(@"noAds") ? nil : %orig; }
 %end
 
 %hook YTDataUtils
@@ -32,21 +116,108 @@ static UIImage *YTImageNamed(NSString *imageName) {
 - (void)decorateContext:(id)context { if (!ytlBool(@"noAds")) %orig; }
 %end
 
+static BOOL isAdItemSectionSupportedRenderer(id renderer) {
+    if (!renderer) return NO;
+    if (([renderer respondsToSelector:@selector(hasPromotedVideoRenderer)] && [renderer hasPromotedVideoRenderer]) ||
+        ([renderer respondsToSelector:@selector(hasCompactPromotedVideoRenderer)] && [renderer hasCompactPromotedVideoRenderer]) ||
+        ([renderer respondsToSelector:@selector(hasPromotedVideoInlineMutedRenderer)] && [renderer hasPromotedVideoInlineMutedRenderer])) {
+        return YES;
+    }
+    if ([renderer respondsToSelector:@selector(elementRenderer)]) {
+        id elementRenderer = [renderer elementRenderer];
+        if (elementRenderer) {
+            if ([elementRenderer respondsToSelector:@selector(hasCompatibilityOptions)] && [elementRenderer hasCompatibilityOptions]) {
+                id compOptions = [elementRenderer respondsToSelector:@selector(compatibilityOptions)] ? [elementRenderer compatibilityOptions] : nil;
+                if ([compOptions respondsToSelector:@selector(hasAdLoggingData)] && [compOptions hasAdLoggingData]) {
+                    return YES;
+                }
+            }
+            NSString *desc = [elementRenderer description];
+            static NSArray *adKeywords = nil;
+            static dispatch_once_t onceToken;
+            dispatch_once(&onceToken, ^{
+                adKeywords = @[
+                    @"brand_promo", @"product_carousel", @"product_engagement_panel",
+                    @"product_item", @"text_search_ad", @"text_image_button_layout",
+                    @"carousel_headered_layout", @"carousel_footered_layout", @"square_image_layout",
+                    @"landscape_image_wide_button_layout", @"feed_ad_metadata", @"promoted_sparkles",
+                    @"statement_banner", @"ad_placement", @"shelf_ad", @"inline_ad",
+                    @"banner_ad", @"prime_info", @"ad_layout", @"brand_promo_cell"
+                ];
+            });
+            for (NSString *ad in adKeywords) {
+                if ([desc containsString:ad]) {
+                    return YES;
+                }
+            }
+        }
+    }
+    return NO;
+}
+
+static char kYTLItemSectionFilteredKey;
+
+%hook YTIItemSectionRenderer
+- (NSMutableArray *)contentsArray {
+    NSMutableArray *contents = %orig;
+    if (ytlBool(@"noAds") && [contents isKindOfClass:[NSMutableArray class]] && contents.count > 0) {
+        if (!objc_getAssociatedObject(self, &kYTLItemSectionFilteredKey)) {
+            objc_setAssociatedObject(self, &kYTLItemSectionFilteredKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            NSIndexSet *removeIndexes = [contents indexesOfObjectsPassingTest:^BOOL(id renderer, NSUInteger idx, BOOL *stop) {
+                return isAdItemSectionSupportedRenderer(renderer);
+            }];
+            if (removeIndexes.count > 0) {
+                [contents removeObjectsAtIndexes:removeIndexes];
+            }
+        }
+    }
+    return contents;
+}
+%end
+
 %hook YTIElementRenderer
 - (NSData *)elementData {
-    if (self.hasCompatibilityOptions && self.compatibilityOptions.hasAdLoggingData && ytlBool(@"noAds")) return nil;
-
-    NSString *description = [self description];
-
-    NSArray *ads = @[@"brand_promo", @"product_carousel", @"product_engagement_panel", @"product_item", @"text_search_ad", @"text_image_button_layout", @"carousel_headered_layout", @"carousel_footered_layout", @"square_image_layout", @"landscape_image_wide_button_layout", @"feed_ad_metadata"];
-    if (ytlBool(@"noAds") && [ads containsObject:description]) {
-        return [NSData data];
+    if (ytlBool(@"noAds")) {
+        if ([self respondsToSelector:@selector(hasCompatibilityOptions)] && [self hasCompatibilityOptions]) {
+            id compOptions = [self respondsToSelector:@selector(compatibilityOptions)] ? [self compatibilityOptions] : nil;
+            if ([compOptions respondsToSelector:@selector(hasAdLoggingData)] && [compOptions hasAdLoggingData]) {
+                return nil;
+            }
+        }
     }
 
-    NSArray *shortsToRemove = @[@"shorts_shelf.eml", @"shorts_video_cell.eml", @"6Shorts"];
-    for (NSString *shorts in shortsToRemove) {
-        if (ytlBool(@"hideShorts") && [description containsString:shorts] && ![description containsString:@"history*"]) {
-            return nil;
+    BOOL hideShorts = ytlBool(@"hideShorts");
+    BOOL noAds = ytlBool(@"noAds");
+
+    if (noAds || hideShorts) {
+        NSString *description = nil;
+
+        if (noAds) {
+            description = [self description];
+            static NSArray *ads = nil;
+            static dispatch_once_t onceToken;
+            dispatch_once(&onceToken, ^{
+                ads = @[@"brand_promo", @"product_carousel", @"product_engagement_panel", @"product_item", @"text_search_ad", @"text_image_button_layout", @"carousel_headered_layout", @"carousel_footered_layout", @"square_image_layout", @"landscape_image_wide_button_layout", @"feed_ad_metadata", @"promoted_sparkles", @"statement_banner", @"ad_placement", @"shelf_ad", @"inline_ad", @"banner_ad", @"prime_info", @"ad_layout", @"brand_promo_cell"];
+            });
+            for (NSString *ad in ads) {
+                if ([description containsString:ad]) {
+                    return nil;
+                }
+            }
+        }
+
+        if (hideShorts) {
+            if (!description) description = [self description];
+            static NSArray *shortsToRemove = nil;
+            static dispatch_once_t shortsToken;
+            dispatch_once(&shortsToken, ^{
+                shortsToRemove = @[@"shorts_shelf.eml", @"shorts_video_cell.eml", @"6Shorts"];
+            });
+            for (NSString *shorts in shortsToRemove) {
+                if ([description containsString:shorts] && ![description containsString:@"history*"]) {
+                    return nil;
+                }
+            }
         }
     }
 
@@ -60,8 +231,21 @@ static UIImage *YTImageNamed(NSString *imageName) {
         NSMutableArray <YTISectionListSupportedRenderers *> *contentsArray = model.contentsArray;
         NSIndexSet *removeIndexes = [contentsArray indexesOfObjectsPassingTest:^BOOL(YTISectionListSupportedRenderers *renderers, NSUInteger idx, BOOL *stop) {
             YTIItemSectionRenderer *sectionRenderer = renderers.itemSectionRenderer;
-            YTIItemSectionSupportedRenderers *firstObject = [sectionRenderer.contentsArray firstObject];
-            return firstObject.hasPromotedVideoRenderer || firstObject.hasCompactPromotedVideoRenderer || firstObject.hasPromotedVideoInlineMutedRenderer;
+            if (!sectionRenderer) return NO;
+            NSMutableArray *items = sectionRenderer.contentsArray;
+            if ([items isKindOfClass:[NSMutableArray class]] && items.count > 0) {
+                NSIndexSet *adIndexes = [items indexesOfObjectsPassingTest:^BOOL(id item, NSUInteger i, BOOL *s) {
+                    return isAdItemSectionSupportedRenderer(item);
+                }];
+                if (adIndexes.count > 0) {
+                    [items removeObjectsAtIndexes:adIndexes];
+                }
+            }
+            NSString *desc = [sectionRenderer description];
+            if ([desc containsString:@"ad_placement"] || [desc containsString:@"Promoted"] || [desc containsString:@"promoted"] || [desc containsString:@"BrandPromo"]) {
+                return YES;
+            }
+            return (items.count == 0);
         }];
         [contentsArray removeObjectsAtIndexes:removeIndexes];
     } %orig;
@@ -426,14 +610,98 @@ void autoSkipShorts(YTPlayerViewController *self, YTSingleVideoController *video
 }
 
 %hook YTPlayerViewController
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    gCurrentPlayerVC = self;
+    [[%c(YTLDownloadManager) sharedManager] setActivePlayerViewController:self];
+    id v = nil;
+    @try { v = [self valueForKey:@"activeVideo"]; } @catch (NSException *e) {}
+    if (v) [[%c(YTLDownloadManager) sharedManager] setActiveVideo:v];
+}
+
 - (void)loadWithPlayerTransition:(id)arg1 playbackConfig:(id)arg2 {
     %orig;
+    gCurrentPlayerVC = self;
+    [[%c(YTLDownloadManager) sharedManager] setActivePlayerViewController:self];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        id v = nil;
+        @try { v = [self valueForKey:@"activeVideo"]; } @catch (NSException *e) {}
+        if (v) [[%c(YTLDownloadManager) sharedManager] setActiveVideo:v];
+    });
 
     if (ytlInt(@"wiFiQualityIndex") != 0 || ytlInt(@"cellQualityIndex") != 0) [self performSelector:@selector(autoQuality) withObject:nil afterDelay:1.0];
     if (ytlBool(@"autoFullscreen")) [self performSelector:@selector(autoFullscreen) withObject:nil afterDelay:0.75];
     if (ytlBool(@"shortsToRegular")) [self performSelector:@selector(shortsToRegular) withObject:nil afterDelay:0.75];
     if (ytlInt(@"autoSpeedIndex") != 3) [self performSelector:@selector(setAutoSpeed) withObject:nil afterDelay:0.75];
     if (ytlBool(@"disableAutoCaptions")) [self performSelector:@selector(turnOffCaptions) withObject:nil afterDelay:1.0];
+}
+
+- (void)setCurrentVideo:(id)arg1 {
+    %orig;
+    gCurrentPlayerVC = self;
+    [[%c(YTLDownloadManager) sharedManager] setActivePlayerViewController:self];
+    if (arg1) [[%c(YTLDownloadManager) sharedManager] setActiveVideo:arg1];
+}
+
+- (void)playbackController:(id)controller didActivateVideo:(id)video withPlaybackData:(id)playbackData {
+    %orig;
+    gCurrentPlayerVC = self;
+    [[%c(YTLDownloadManager) sharedManager] setActivePlayerViewController:self];
+    NSString *vid = nil;
+    if ([self respondsToSelector:@selector(contentVideoID)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        vid = [self performSelector:@selector(contentVideoID)];
+        #pragma clang diagnostic pop
+    }
+    if (!vid && [self respondsToSelector:@selector(currentVideoID)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        vid = [self performSelector:@selector(currentVideoID)];
+        #pragma clang diagnostic pop
+    }
+    id pr = nil;
+    if ([self respondsToSelector:@selector(contentPlayerResponse)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        pr = [self performSelector:@selector(contentPlayerResponse)];
+        #pragma clang diagnostic pop
+    }
+    if (!pr && [self respondsToSelector:@selector(playerResponse)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        pr = [self performSelector:@selector(playerResponse)];
+        #pragma clang diagnostic pop
+    }
+    if ([[%c(YTLDownloadManager) sharedManager] respondsToSelector:@selector(didActivateVideo:withPlaybackData:videoID:playerResponse:)]) {
+        [[%c(YTLDownloadManager) sharedManager] didActivateVideo:video withPlaybackData:playbackData videoID:vid playerResponse:pr];
+    } else {
+        [[%c(YTLDownloadManager) sharedManager] didActivateVideoWithPlaybackData:playbackData videoID:vid playerResponse:pr];
+    }
+}
+
+- (void)playbackControllerDidActivateVideo:(id)video withPlayerResponse:(id)playerResponse {
+    %orig;
+    gCurrentPlayerVC = self;
+    [[%c(YTLDownloadManager) sharedManager] setActivePlayerViewController:self];
+    NSString *vid = nil;
+    if ([self respondsToSelector:@selector(contentVideoID)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        vid = [self performSelector:@selector(contentVideoID)];
+        #pragma clang diagnostic pop
+    }
+    if (!vid && [self respondsToSelector:@selector(currentVideoID)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        vid = [self performSelector:@selector(currentVideoID)];
+        #pragma clang diagnostic pop
+    }
+    if ([[%c(YTLDownloadManager) sharedManager] respondsToSelector:@selector(didActivateVideo:withPlaybackData:videoID:playerResponse:)]) {
+        [[%c(YTLDownloadManager) sharedManager] didActivateVideo:video withPlaybackData:nil videoID:vid playerResponse:playerResponse];
+    } else {
+        [[%c(YTLDownloadManager) sharedManager] didActivateVideoWithPlaybackData:nil videoID:vid playerResponse:playerResponse];
+    }
 }
 
 %new
@@ -596,6 +864,50 @@ void autoSkipShorts(YTPlayerViewController *self, YTSingleVideoController *video
 
     return label;
 }
+
+- (void)layoutSubviews {
+    %orig;
+
+    BOOL isDlBtn = [objc_getAssociatedObject(self, "ytl_is_download_button") boolValue];
+    if (!isDlBtn) {
+        NSString *t = self.currentTitle ?: self.titleLabel.text;
+        if (t && ([t isEqualToString:LOC(@"DownloadVideo")] || [t isEqualToString:@"Download video"] || [t isEqualToString:@"Tải video"] || [t isEqualToString:@"Tải xuống video"])) {
+            isDlBtn = YES;
+        }
+    }
+
+    if (isDlBtn) {
+        UIButton *sample = objc_getAssociatedObject(self, "ytl_sample_button");
+        if (!sample && self.superview) {
+            for (UIView *sub in self.superview.subviews) {
+                if ([sub isKindOfClass:[UIButton class]] && sub != self) {
+                    UIButton *other = (UIButton *)sub;
+                    if (other.titleLabel && other.titleLabel.frame.origin.x > 0) {
+                        sample = other;
+                        break;
+                    }
+                }
+            }
+        }
+        if (sample) {
+            if (sample.imageView && self.imageView && sample.imageView.frame.origin.x > 0) {
+                CGRect imgF = self.imageView.frame;
+                if (fabs(imgF.origin.x - sample.imageView.frame.origin.x) > 0.5) {
+                    imgF.origin.x = sample.imageView.frame.origin.x;
+                    self.imageView.frame = imgF;
+                }
+            }
+            if (sample.titleLabel && self.titleLabel && sample.titleLabel.frame.origin.x > 0) {
+                CGFloat targetX = sample.titleLabel.frame.origin.x;
+                CGRect f = self.titleLabel.frame;
+                if (fabs(f.origin.x - targetX) > 0.5) {
+                    f.origin.x = targetX;
+                    self.titleLabel.frame = f;
+                }
+            }
+        }
+    }
+}
 %end
 
 // Fit Shorts Button Labels For Localizations
@@ -625,13 +937,340 @@ void autoSkipShorts(YTPlayerViewController *self, YTSingleVideoController *video
 }
 %end
 
-// Remove Download button from the menu
+static UIImage *gCachedDownloadIcon = nil;
+
+static UIImage *normalizeIcon24(UIImage *img) {
+    if (!img) return nil;
+    CGSize targetSize = CGSizeMake(24.0, 24.0);
+    if (CGSizeEqualToSize(img.size, targetSize)) {
+        return [img imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    }
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
+    format.scale = img.scale > 0 ? img.scale : [UIScreen mainScreen].scale;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:targetSize format:format];
+    UIImage *normalized = [renderer imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        CGFloat w = img.size.width;
+        CGFloat h = img.size.height;
+        if (w <= 0 || h <= 0) return;
+        CGFloat scale = MIN(24.0 / w, 24.0 / h);
+        if (scale > 1.0) scale = 1.0;
+        CGFloat drawW = w * scale;
+        CGFloat drawH = h * scale;
+        CGFloat x = (24.0 - drawW) / 2.0;
+        CGFloat y = (24.0 - drawH) / 2.0;
+        [img drawInRect:CGRectMake(x, y, drawW, drawH)];
+    }];
+    return [normalized imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+}
+
+
+static NSString *extractStringFromTitle(id titleObj) {
+    if (!titleObj) return nil;
+    if ([titleObj isKindOfClass:[NSString class]]) return (NSString *)titleObj;
+    if ([titleObj isKindOfClass:[NSAttributedString class]]) return [(NSAttributedString *)titleObj string];
+    if ([titleObj respondsToSelector:@selector(stringWithFormattingRemoved)]) {
+        @try {
+            NSString *s = [titleObj performSelector:@selector(stringWithFormattingRemoved)];
+            if ([s isKindOfClass:[NSString class]] && s.length > 0) return s;
+        } @catch (NSException *e) {}
+    }
+    if ([titleObj respondsToSelector:@selector(runsArray)]) {
+        @try {
+            id runs = [titleObj performSelector:@selector(runsArray)];
+            if ([runs isKindOfClass:[NSArray class]]) {
+                NSMutableString *combined = [NSMutableString string];
+                for (id run in runs) {
+                    id text = [run valueForKey:@"text"];
+                    if ([text isKindOfClass:[NSString class]]) [combined appendString:text];
+                }
+                if (combined.length > 0) return combined;
+            }
+        } @catch (NSException *e) {}
+    }
+    if ([titleObj respondsToSelector:@selector(string)]) {
+        @try {
+            NSString *s = [titleObj performSelector:@selector(string)];
+            if ([s isKindOfClass:[NSString class]]) return s;
+        } @catch (NSException *e) {}
+    }
+    if ([titleObj respondsToSelector:@selector(simpleText)]) {
+        @try {
+            NSString *s = [titleObj performSelector:@selector(simpleText)];
+            if ([s isKindOfClass:[NSString class]]) return s;
+        } @catch (NSException *e) {}
+    }
+    @try {
+        NSString *s = [titleObj description];
+        if ([s isKindOfClass:[NSString class]] && ![s hasPrefix:@"<"]) return s;
+    } @catch (NSException *e) {}
+    return nil;
+}
+
+static UIButton *getActionButton(id action) {
+    if (!action) return nil;
+    if ([action respondsToSelector:@selector(button)]) {
+        @try {
+            id btn = [action performSelector:@selector(button)];
+            if ([btn isKindOfClass:[UIButton class]]) return (UIButton *)btn;
+        } @catch (NSException *e) {}
+    }
+    @try {
+        id btn = [action valueForKey:@"button"] ?: [action valueForKey:@"_button"];
+        if ([btn isKindOfClass:[UIButton class]]) return (UIButton *)btn;
+    } @catch (NSException *e) {}
+    return nil;
+}
+
+static NSString *getActionIdentifier(id action) {
+    if (!action) return nil;
+    if ([action respondsToSelector:@selector(accessibilityIdentifier)]) {
+        @try {
+            id ident = [action performSelector:@selector(accessibilityIdentifier)];
+            if ([ident isKindOfClass:[NSString class]]) return (NSString *)ident;
+            if (ident) return [ident description];
+        } @catch (NSException *e) {}
+    }
+    @try {
+        id ident = [action valueForKey:@"_accessibilityIdentifier"] ?: [action valueForKey:@"accessibilityIdentifier"];
+        if ([ident isKindOfClass:[NSString class]]) return (NSString *)ident;
+        if (ident) return [ident description];
+    } @catch (NSException *e) {}
+    UIButton *btn = getActionButton(action);
+    if (btn && btn.accessibilityIdentifier) return btn.accessibilityIdentifier;
+    return nil;
+}
+
+static BOOL isDownloadKeyword(NSString *str) {
+    if (!str || str.length == 0) return NO;
+    NSString *folded = [[str stringByFoldingWithOptions:kCFCompareCaseInsensitive | kCFCompareDiacriticInsensitive locale:[NSLocale currentLocale]] lowercaseString];
+    if ([folded containsString:@"download"] ||
+        [folded containsString:@"tai xuong"] ||
+        [folded containsString:@"tai video"] ||
+        [folded containsString:@"offline"] ||
+        [folded containsString:@"ngoai tuyen"] ||
+        [folded containsString:@"descargar"] ||
+        [folded containsString:@"telecharger"] ||
+        [folded containsString:@"herunterladen"] ||
+        [folded containsString:@"scarica"] ||
+        [folded containsString:@"скачать"] ||
+        [folded containsString:@"다운로드"] ||
+        [folded containsString:@"ダウンロード"] ||
+        [folded containsString:@"下载"] ||
+        [folded containsString:@"下載"] ||
+        [folded containsString:@"unduh"] ||
+        [folded containsString:@"indir"]) {
+        return YES;
+    }
+    return NO;
+}
+
+static void extractAllStringsFromButton(UIButton *btn, NSMutableArray<NSString *> *outStrings) {
+    if (!btn || ![btn isKindOfClass:[UIButton class]]) return;
+    if (btn.currentTitle.length > 0) [outStrings addObject:btn.currentTitle];
+    if (btn.currentAttributedTitle.string.length > 0) [outStrings addObject:btn.currentAttributedTitle.string];
+
+    UIControlState states[] = {UIControlStateNormal, UIControlStateHighlighted, UIControlStateDisabled, UIControlStateSelected};
+    for (int i = 0; i < 4; i++) {
+        @try {
+            NSString *t = [btn titleForState:states[i]];
+            if (t.length > 0) [outStrings addObject:t];
+            NSAttributedString *at = [btn attributedTitleForState:states[i]];
+            if (at.string.length > 0) [outStrings addObject:at.string];
+        } @catch (NSException *e) {}
+    }
+    @try {
+        if (btn.titleLabel.text.length > 0) [outStrings addObject:btn.titleLabel.text];
+        if (btn.titleLabel.attributedText.string.length > 0) [outStrings addObject:btn.titleLabel.attributedText.string];
+    } @catch (NSException *e) {}
+    if (btn.accessibilityLabel.length > 0) [outStrings addObject:btn.accessibilityLabel];
+    if (btn.accessibilityIdentifier.length > 0) [outStrings addObject:btn.accessibilityIdentifier];
+
+    for (UIView *sub in btn.subviews) {
+        if ([sub isKindOfClass:[UILabel class]]) {
+            UILabel *lbl = (UILabel *)sub;
+            if (lbl.text.length > 0) [outStrings addObject:lbl.text];
+            if (lbl.attributedText.string.length > 0) [outStrings addObject:lbl.attributedText.string];
+        }
+    }
+}
+
+static void extractAllStringsFromAction(id action, NSMutableArray<NSString *> *outStrings) {
+    if (!action) return;
+
+    @try {
+        id ident = [action valueForKey:@"_accessibilityIdentifier"] ?: [action valueForKey:@"accessibilityIdentifier"];
+        if (ident) [outStrings addObject:[ident description]];
+    } @catch (NSException *e) {}
+    @try {
+        id lbl = [action valueForKey:@"_accessibilityLabel"] ?: [action valueForKey:@"accessibilityLabel"];
+        if (lbl) [outStrings addObject:[lbl description]];
+    } @catch (NSException *e) {}
+
+    NSArray *selectors = @[@"title", @"text", @"accessibilityLabel", @"accessibilityIdentifier", @"actionTitle"];
+    for (NSString *selName in selectors) {
+        SEL sel = NSSelectorFromString(selName);
+        if ([action respondsToSelector:sel]) {
+            @try {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                id val = [action performSelector:sel];
+                #pragma clang diagnostic pop
+                if ([val isKindOfClass:[NSString class]] && [(NSString *)val length] > 0) [outStrings addObject:(NSString *)val];
+                else if ([val isKindOfClass:[NSAttributedString class]] && [(NSAttributedString *)val string].length > 0) [outStrings addObject:[(NSAttributedString *)val string]];
+                else {
+                    NSString *s = extractStringFromTitle(val);
+                    if (s.length > 0) [outStrings addObject:s];
+                }
+            } @catch (NSException *e) {}
+        }
+    }
+
+    NSArray *keys = @[@"title", @"_title", @"text", @"_text", @"titleText", @"_titleText", @"formattedTitle", @"_formattedTitle"];
+    for (NSString *key in keys) {
+        @try {
+            id val = [action valueForKey:key];
+            if ([val isKindOfClass:[NSString class]] && [(NSString *)val length] > 0) [outStrings addObject:(NSString *)val];
+            else if ([val isKindOfClass:[NSAttributedString class]] && [(NSAttributedString *)val string].length > 0) [outStrings addObject:[(NSAttributedString *)val string]];
+            else if (val) {
+                NSString *s = extractStringFromTitle(val);
+                if (s.length > 0) [outStrings addObject:s];
+            }
+        } @catch (NSException *e) {}
+    }
+
+    UIButton *btn = getActionButton(action);
+    if (btn) {
+        extractAllStringsFromButton(btn, outStrings);
+    }
+
+    unsigned int count = 0;
+    Ivar *ivars = class_copyIvarList([action class], &count);
+    if (ivars) {
+        for (unsigned int i = 0; i < count; i++) {
+            const char *type = ivar_getTypeEncoding(ivars[i]);
+            if (type && type[0] == '@') {
+                @try {
+                    id val = object_getIvar(action, ivars[i]);
+                    if (val) {
+                        if ([val isKindOfClass:[NSString class]]) {
+                            if ([(NSString *)val length] > 0) [outStrings addObject:(NSString *)val];
+                        } else if ([val isKindOfClass:[NSAttributedString class]]) {
+                            if ([(NSAttributedString *)val string].length > 0) [outStrings addObject:[(NSAttributedString *)val string]];
+                        } else if ([val isKindOfClass:[UIButton class]]) {
+                            extractAllStringsFromButton((UIButton *)val, outStrings);
+                        } else {
+                            NSString *s = extractStringFromTitle(val);
+                            if (s.length > 0) [outStrings addObject:s];
+                            NSString *desc = [val description];
+                            if (desc.length > 0 && desc.length < 500 && ![desc hasPrefix:@"<"]) {
+                                [outStrings addObject:desc];
+                            }
+                        }
+                    }
+                } @catch (NSException *e) {}
+            }
+        }
+        free(ivars);
+    }
+
+    @try {
+        NSString *desc = [action description];
+        if (desc.length > 0 && desc.length < 500) [outStrings addObject:desc];
+    } @catch (NSException *e) {}
+}
+
+static BOOL isDownloadAction(YTActionSheetAction *action) {
+    if (!action) return NO;
+    if ([objc_getAssociatedObject(action, "ytl_is_safe_download") boolValue]) return NO;
+
+    NSString *ident = getActionIdentifier(action);
+    if ([ident isEqualToString:@"7"]) return YES;
+
+    NSMutableArray<NSString *> *allStrings = [NSMutableArray array];
+    extractAllStringsFromAction(action, allStrings);
+
+    for (NSString *str in allStrings) {
+        if (![str isKindOfClass:[NSString class]] || str.length == 0) continue;
+        NSString *lower = [str lowercaseString];
+        if ([lower isEqualToString:@"7"] ||
+            [lower containsString:@"download"] ||
+            [lower containsString:@"offline"] ||
+            [lower containsString:@"add_to_offline"] ||
+            [lower containsString:@"add_to.offline"] ||
+            [lower containsString:@"add.to.offline"] ||
+            isDownloadKeyword(str)) {
+            return YES;
+        }
+    }
+
+    UIImage *icon = nil;
+    @try { icon = [action valueForKey:@"iconImage"] ?: [action valueForKey:@"_iconImage"]; } @catch (NSException *e) {}
+    UIButton *btn = getActionButton(action);
+    if (!icon && btn) icon = [btn imageForState:UIControlStateNormal] ?: btn.currentImage ?: btn.imageView.image;
+    if (icon && icon.accessibilityIdentifier) {
+        NSString *iconIdent = [icon.accessibilityIdentifier lowercaseString];
+        if ([iconIdent containsString:@"download"] || [iconIdent containsString:@"offline"]) return YES;
+    }
+
+    // Check endpoint/command object — nút download gốc luôn chứa offlineVideoEndpoint
+    @try {
+        id ep = [action valueForKey:@"serviceEndpoint"] ?: [action valueForKey:@"_serviceEndpoint"] ?: [action valueForKey:@"command"] ?: [action valueForKey:@"_command"];
+        if (ep) {
+            id dlEp = nil;
+            @try { dlEp = [ep valueForKey:@"offlineVideoEndpoint"]; } @catch (NSException *e) {}
+            if (!dlEp) @try { dlEp = [ep valueForKey:@"downloadVideoEndpoint"]; } @catch (NSException *e) {}
+            if (dlEp) return YES;
+
+            NSString *epClass = NSStringFromClass([ep class]);
+            if ([epClass containsString:@"Offline"] || [epClass containsString:@"Download"]) return YES;
+        }
+    } @catch (NSException *e) {}
+
+    return NO;
+}
+
+
 %hook YTDefaultSheetController
+- (void)setActions:(NSMutableArray *)actions {
+    if ([actions isKindOfClass:[NSArray class]] && ytlBool(@"removeDownloadMenu")) {
+        NSMutableArray *filtered = [actions mutableCopy];
+        BOOL removed = NO;
+        for (NSInteger i = (NSInteger)filtered.count - 1; i >= 0; i--) {
+            id act = filtered[i];
+            if (isDownloadAction(act)) {
+                [filtered removeObjectAtIndex:i];
+                removed = YES;
+            }
+        }
+        if (removed) {
+            %orig(filtered);
+            return;
+        }
+    }
+    %orig(actions);
+}
+
 - (void)addAction:(YTActionSheetAction *)action {
-    NSString *identifier = [action valueForKey:@"_accessibilityIdentifier"];
+    if (!action) {
+        %orig(action);
+        return;
+    }
+
+    if ([objc_getAssociatedObject(action, "ytl_is_safe_download") boolValue]) {
+        %orig(action);
+        return;
+    }
+
+    NSString *identifier = getActionIdentifier(action);
+
+    BOOL isDownload = isDownloadAction(action);
+
+    // Người dùng chọn tắt menu tải xuống
+    if (isDownload && ytlBool(@"removeDownloadMenu")) {
+        return;
+    }
 
     NSDictionary *actionsToRemove = @{
-        @"7": @(ytlBool(@"removeDownloadMenu")),
         @"1": @(ytlBool(@"removeWatchLaterMenu")),
         @"3": @(ytlBool(@"removeSaveToPlaylistMenu")),
         @"5": @(ytlBool(@"removeShareMenu")),
@@ -640,9 +1279,49 @@ void autoSkipShorts(YTPlayerViewController *self, YTSingleVideoController *video
         @"58": @(ytlBool(@"removeReportMenu"))
     };
 
-    if (![actionsToRemove[identifier] boolValue]) {
-        %orig;
+    if (identifier && [actionsToRemove[identifier] boolValue]) {
+        return;
     }
+
+    // Nếu tính năng Download Manager bật và đây là action Tải xuống gốc của YouTube:
+    // Giữ nút gốc — khi bấm sẽ trigger offline endpoint → hook redirect sang YTLDownloadManager
+    if (isDownload && ytlBool(@"downloadManager")) {
+        // Trích xuất icon gốc để cache
+        UIButton *btn = getActionButton(action);
+        UIImage *nativeIcon = nil;
+        @try { nativeIcon = [action valueForKey:@"iconImage"] ?: [action valueForKey:@"_iconImage"]; } @catch (NSException *e) {}
+        if (!nativeIcon && btn) nativeIcon = btn.currentImage ?: btn.imageView.image;
+        if (nativeIcon) {
+            gCachedDownloadIcon = normalizeIcon24(nativeIcon);
+        }
+
+        // Trích xuất videoId nếu action gốc chứa endpoint/command
+        NSString *extractedVid = nil;
+        @try {
+            id ep = [action valueForKey:@"serviceEndpoint"] ?: [action valueForKey:@"_serviceEndpoint"] ?: [action valueForKey:@"command"] ?: [action valueForKey:@"_command"];
+            if (ep) {
+                id dlEp = [ep valueForKey:@"offlineVideoEndpoint"] ?: [ep valueForKey:@"downloadVideoEndpoint"] ?: ep;
+                extractedVid = [dlEp valueForKey:@"videoId"] ?: [dlEp valueForKey:@"videoID"];
+            }
+        } @catch (NSException *e) {}
+        if (extractedVid && extractedVid.length > 0) {
+            [[%c(YTLDownloadManager) sharedManager] setLastActiveVideoID:extractedVid];
+        }
+
+        // Cho nút gốc pass through — offline endpoint hook sẽ xử lý khi user bấm
+        %orig(action);
+        return;
+    }
+
+    %orig(action);
+}
+
+- (void)presentFromView:(UIView *)view animated:(BOOL)animated completion:(void(^)(void))completion {
+    %orig;
+}
+
+- (void)presentFromViewController:(UIViewController *)vc animated:(BOOL)animated completion:(void(^)(void))completion {
+    %orig;
 }
 %end
 
@@ -918,6 +1597,7 @@ static void genImageFromLayer(CALayer *layer, UIColor *backgroundColor, void (^c
 %end
 
 %hook ASDisplayNode
+
 - (void)setFrame:(CGRect)frame {
     %orig;
 
@@ -1321,11 +2001,17 @@ static void manageSpeedmasterYTLite(UILongPressGestureRecognizer *gesture, YTMai
 
 %hook YTMainAppVideoPlayerOverlayView
 - (void)setSeekAnywherePanGestureRecognizer:(id)arg1 {
-    if (ytlInt(@"speedIndex") == 0) return %orig;
+    %orig;
+
+    if (objc_lookUpClass("YTSpeedmasterController") != nil) return;
+    if (ytlInt(@"speedIndex") == 0) return;
 
     UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(speedmasterYtLite:)];
     longPress.minimumPressDuration = 0.3;
-    if (ytlInt(@"speedIndex") != 0) [self addGestureRecognizer:longPress];
+    longPress.delaysTouchesBegan = NO;
+    longPress.delaysTouchesEnded = NO;
+    longPress.cancelsTouchesInView = NO;
+    [self addGestureRecognizer:longPress];
 }
 
 %new
@@ -1374,13 +2060,306 @@ static NSURL *newCoverURL(NSURL *originalURL) {
 }
 %end
 
-// %hook ELMImageDownloader
-// - (id)downloadImageWithURL:(id)arg1 targetSize:(CGSize)arg2 callbackQueue:(id)arg3 downloadProgress:(id)arg4 completion:(id)arg5 {
-//     return %orig(newCoverURL(arg1), arg2, arg3, arg4, arg5);
-// }
-// %end
+%group OfflineInterception
+
+%hook YTOfflineVideoEndpointCommandHandlerImpl
+- (void)executeWithCommand:(id)command entry:(id)entry fromView:(id)fromView {
+    if (ytlBool(@"downloadManager")) {
+        @try {
+            [[%c(YTLDownloadManager) sharedManager] handleOfflineEndpointCommand:command entry:entry fromView:fromView];
+        } @catch (NSException *e) {}
+        return;
+    }
+    %orig;
+}
+- (void)executeWithCommand:(id)command entry:(id)entry fromView:(id)fromView sender:(id)sender {
+    if (ytlBool(@"downloadManager")) {
+        @try {
+            [[%c(YTLDownloadManager) sharedManager] handleOfflineEndpointCommand:command entry:entry fromView:fromView];
+        } @catch (NSException *e) {}
+        return;
+    }
+    %orig;
+}
+- (void)executeWithCommand:(id)command entry:(id)entry fromView:(id)fromView sender:(id)sender completionBlock:(id)block {
+    if (ytlBool(@"downloadManager")) {
+        @try {
+            [[%c(YTLDownloadManager) sharedManager] handleOfflineEndpointCommand:command entry:entry fromView:fromView];
+        } @catch (NSException *e) {}
+        return;
+    }
+    %orig;
+}
+- (void)executeWithCommand:(id)command {
+    if (ytlBool(@"downloadManager")) {
+        @try {
+            [[%c(YTLDownloadManager) sharedManager] handleOfflineEndpointCommand:command entry:nil fromView:nil];
+        } @catch (NSException *e) {}
+        return;
+    }
+    %orig;
+}
+- (void)executeWithCommandContext:(id)context handler:(id)handler {
+    if (ytlBool(@"downloadManager")) {
+        @try {
+            id command = nil;
+            @try { command = [context valueForKey:@"command"]; } @catch (NSException *e) {}
+            [[%c(YTLDownloadManager) sharedManager] handleOfflineEndpointCommand:command entry:nil fromView:nil];
+        } @catch (NSException *e) {}
+        return;
+    }
+    %orig;
+}
+%end
+
+%hook YTOfflineVideoEndpointCommandHandler
+- (void)executeWithCommand:(id)command entry:(id)entry fromView:(id)fromView {
+    if (ytlBool(@"downloadManager")) {
+        @try {
+            [[%c(YTLDownloadManager) sharedManager] handleOfflineEndpointCommand:command entry:entry fromView:fromView];
+        } @catch (NSException *e) {}
+        return;
+    }
+    %orig;
+}
+- (void)executeWithCommand:(id)command entry:(id)entry fromView:(id)fromView sender:(id)sender {
+    if (ytlBool(@"downloadManager")) {
+        @try {
+            [[%c(YTLDownloadManager) sharedManager] handleOfflineEndpointCommand:command entry:entry fromView:fromView];
+        } @catch (NSException *e) {}
+        return;
+    }
+    %orig;
+}
+- (void)executeWithCommand:(id)command entry:(id)entry fromView:(id)fromView sender:(id)sender completionBlock:(id)block {
+    if (ytlBool(@"downloadManager")) {
+        @try {
+            [[%c(YTLDownloadManager) sharedManager] handleOfflineEndpointCommand:command entry:entry fromView:fromView];
+        } @catch (NSException *e) {}
+        return;
+    }
+    %orig;
+}
+- (void)executeWithCommand:(id)command {
+    if (ytlBool(@"downloadManager")) {
+        @try {
+            [[%c(YTLDownloadManager) sharedManager] handleOfflineEndpointCommand:command entry:nil fromView:nil];
+        } @catch (NSException *e) {}
+        return;
+    }
+    %orig;
+}
+- (void)executeWithCommandContext:(id)context handler:(id)handler {
+    if (ytlBool(@"downloadManager")) {
+        @try {
+            id command = nil;
+            @try { command = [context valueForKey:@"command"]; } @catch (NSException *e) {}
+            [[%c(YTLDownloadManager) sharedManager] handleOfflineEndpointCommand:command entry:nil fromView:nil];
+        } @catch (NSException *e) {}
+        return;
+    }
+    %orig;
+}
+%end
+
+%hook YTOfflineQualitySelectionAlertView
+- (void)show {
+    if (ytlBool(@"downloadManager")) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[%c(YTLDownloadManager) sharedManager] handleOfflineEndpointCommand:nil entry:nil fromView:nil];
+        });
+        return;
+    }
+    %orig;
+}
+%end
+
+%hook YTOfflineVideoQualitySelectorViewController
+- (void)viewDidLoad {
+    %orig;
+    if (ytlBool(@"downloadManager")) {
+        ((UIViewController *)self).view.hidden = YES;
+    }
+}
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    if (ytlBool(@"downloadManager")) {
+        [self dismissViewControllerAnimated:NO completion:^{
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                NSString *vid = [[%c(YTLDownloadManager) sharedManager] lastActiveVideoID];
+                if (!vid && gCurrentPlayerVC) {
+                    @try { vid = [gCurrentPlayerVC contentVideoID] ?: [gCurrentPlayerVC valueForKey:@"currentVideoID"]; } @catch (NSException *e) {}
+                }
+                if (vid && vid.length > 0) {
+                    [[%c(YTLDownloadManager) sharedManager] handleDownloadForVideoId:vid playerResponse:nil sourceView:nil];
+                }
+            });
+        }];
+    }
+}
+%end
+
+%hook ELMPBShowActionSheetCommand
+- (void)executeWithCommandContext:(id)context handler:(id)handler {
+    if (ytlBool(@"downloadManager")) {
+        NSString *desc = [self description];
+        NSString *ctxDesc = [context description];
+        static NSRegularExpression *re = nil;
+        static NSRegularExpression *urlRe = nil;
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{
+            re = [NSRegularExpression regularExpressionWithPattern:@"(?:video_id|videoId|videoID)[\":=\\s]+([a-zA-Z0-9_-]{11})" options:NSRegularExpressionCaseInsensitive error:nil];
+            urlRe = [NSRegularExpression regularExpressionWithPattern:@"(?:youtu\\.be/|v=|/v/|/embed/)([a-zA-Z0-9_-]{11})" options:NSRegularExpressionCaseInsensitive error:nil];
+        });
+        NSTextCheckingResult *match = [re firstMatchInString:desc options:0 range:NSMakeRange(0, desc.length)];
+        if (!match && ctxDesc) {
+            match = [re firstMatchInString:ctxDesc options:0 range:NSMakeRange(0, ctxDesc.length)];
+        }
+        if (match && match.numberOfRanges > 1) {
+            NSString *targetStr = (match.range.location < desc.length) ? desc : ctxDesc;
+            NSString *vid = [targetStr substringWithRange:[match rangeAtIndex:1]];
+            [[%c(YTLDownloadManager) sharedManager] setLastActiveVideoID:vid];
+        } else {
+            NSTextCheckingResult *uMatch = [urlRe firstMatchInString:desc options:0 range:NSMakeRange(0, desc.length)];
+            if (!uMatch && ctxDesc) {
+                uMatch = [urlRe firstMatchInString:ctxDesc options:0 range:NSMakeRange(0, ctxDesc.length)];
+            }
+            if (uMatch && uMatch.numberOfRanges > 1) {
+                NSString *targetStr = (uMatch.range.location < desc.length) ? desc : ctxDesc;
+                NSString *vid = [targetStr substringWithRange:[uMatch rangeAtIndex:1]];
+                [[%c(YTLDownloadManager) sharedManager] setLastActiveVideoID:vid];
+            }
+        }
+    }
+    %orig;
+}
+%end
+
+%hook YTShareEntityEndpointCommandHandler
+- (void)executeWithCommand:(id)command entry:(id)entry fromView:(id)fromView sender:(id)sender {
+    if (ytlBool(@"downloadManager")) {
+        NSString *desc = [command description];
+        static NSRegularExpression *re = nil;
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{
+            re = [NSRegularExpression regularExpressionWithPattern:@"(?:video_id|videoId|videoID)[\":=\\s]+([a-zA-Z0-9_-]{11})" options:NSRegularExpressionCaseInsensitive error:nil];
+        });
+        NSTextCheckingResult *match = [re firstMatchInString:desc options:0 range:NSMakeRange(0, desc.length)];
+        if (match && match.numberOfRanges > 1) {
+            NSString *vid = [desc substringWithRange:[match rangeAtIndex:1]];
+            [[%c(YTLDownloadManager) sharedManager] setLastActiveVideoID:vid];
+        }
+    }
+    %orig;
+}
+%end
+
+%hook YTInlinePlayerBarContainerView
+- (void)setDelegate:(id)delegate {
+    %orig;
+    if (delegate && ytlBool(@"downloadManager")) {
+        @try {
+            id pr = nil;
+            if ([delegate respondsToSelector:@selector(contentPlayerResponse)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                pr = [delegate performSelector:@selector(contentPlayerResponse)];
+                #pragma clang diagnostic pop
+            } else if ([delegate respondsToSelector:@selector(playerResponse)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                pr = [delegate performSelector:@selector(playerResponse)];
+                #pragma clang diagnostic pop
+            }
+            if (!pr) pr = [delegate valueForKey:@"contentPlayerResponse"] ?: [delegate valueForKey:@"playerResponse"];
+            id vid = [delegate valueForKey:@"videoId"] ?: [delegate valueForKey:@"videoID"];
+            if (pr || vid) {
+                [[%c(YTLDownloadManager) sharedManager] didActivateVideoWithPlaybackData:nil videoID:vid playerResponse:pr];
+            }
+        } @catch (NSException *e) {}
+    }
+}
+%end
+
+%hook YTCorePlaybackController
+- (void)playbackController:(id)controller didActivateVideo:(id)video withPlaybackData:(id)playbackData {
+    %orig;
+    if (ytlBool(@"downloadManager")) {
+        @try {
+            NSString *vid = nil;
+            if ([video respondsToSelector:@selector(videoId)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                vid = [video performSelector:@selector(videoId)];
+                #pragma clang diagnostic pop
+            } else if ([video respondsToSelector:@selector(videoID)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                vid = [video performSelector:@selector(videoID)];
+                #pragma clang diagnostic pop
+            }
+            if (!vid) vid = [video valueForKey:@"videoId"] ?: [video valueForKey:@"videoID"];
+
+            id pr = nil;
+            if ([playbackData respondsToSelector:@selector(playerResponse)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                pr = [playbackData performSelector:@selector(playerResponse)];
+                #pragma clang diagnostic pop
+            } else if ([playbackData respondsToSelector:@selector(contentPlayerResponse)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                pr = [playbackData performSelector:@selector(contentPlayerResponse)];
+                #pragma clang diagnostic pop
+            }
+            if (!pr) pr = [playbackData valueForKey:@"playerResponse"] ?: [playbackData valueForKey:@"contentPlayerResponse"];
+
+            [[%c(YTLDownloadManager) sharedManager] didActivateVideo:video withPlaybackData:playbackData videoID:vid playerResponse:pr];
+        } @catch (NSException *e) {}
+    }
+}
+
+- (void)playbackControllerDidActivateVideo:(id)video withPlayerResponse:(id)playerResponse {
+    %orig;
+    if (ytlBool(@"downloadManager")) {
+        @try {
+            NSString *vid = nil;
+            if ([video respondsToSelector:@selector(videoId)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                vid = [video performSelector:@selector(videoId)];
+                #pragma clang diagnostic pop
+            } else if ([video respondsToSelector:@selector(videoID)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                vid = [video performSelector:@selector(videoID)];
+                #pragma clang diagnostic pop
+            }
+            if (!vid) vid = [video valueForKey:@"videoId"] ?: [video valueForKey:@"videoID"];
+
+            [[%c(YTLDownloadManager) sharedManager] didActivateVideo:video withPlaybackData:nil videoID:vid playerResponse:playerResponse];
+        } @catch (NSException *e) {}
+    }
+}
+%end
+
+%end
 
 %ctor {
+    %init;
+
+    if (objc_lookUpClass("YTOfflineVideoEndpointCommandHandlerImpl") || objc_lookUpClass("YTOfflineVideoEndpointCommandHandler") || objc_lookUpClass("YTOfflineQualitySelectionAlertView") || objc_lookUpClass("ELMPBShowActionSheetCommand") || objc_lookUpClass("YTInlinePlayerBarContainerView") || objc_lookUpClass("YTCorePlaybackController")) {
+        %init(OfflineInterception,
+              YTOfflineVideoEndpointCommandHandlerImpl = objc_lookUpClass("YTOfflineVideoEndpointCommandHandlerImpl"),
+              YTOfflineVideoEndpointCommandHandler = objc_lookUpClass("YTOfflineVideoEndpointCommandHandler"),
+              YTOfflineQualitySelectionAlertView = objc_lookUpClass("YTOfflineQualitySelectionAlertView"),
+              YTOfflineVideoQualitySelectorViewController = objc_lookUpClass("YTOfflineVideoQualitySelectorViewController"),
+              ELMPBShowActionSheetCommand = objc_lookUpClass("ELMPBShowActionSheetCommand"),
+              YTShareEntityEndpointCommandHandler = objc_lookUpClass("YTShareEntityEndpointCommandHandler"),
+              YTInlinePlayerBarContainerView = objc_lookUpClass("YTInlinePlayerBarContainerView"),
+              YTCorePlaybackController = objc_lookUpClass("YTCorePlaybackController"));
+    }
+
     if (ytlBool(@"shortsOnlyMode") && (ytlBool(@"removeShorts") || ytlBool(@"reExplore"))) {
         ytlSetBool(NO, @"removeShorts");
         ytlSetBool(NO, @"reExplore");

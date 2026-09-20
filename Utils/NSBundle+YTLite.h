@@ -1,5 +1,8 @@
 #import <Foundation/Foundation.h>
+
+#if __has_include(<roothide.h>)
 #import <roothide.h>
+#endif
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -7,6 +10,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 // Returns YTLite default bundle. Supports rootless if defined in compilation parameters
 @property (class, nonatomic, readonly) NSBundle *ytl_defaultBundle;
+
++ (NSString *)ytl_localizedStringForKey:(NSString *)key;
 
 @end
 
