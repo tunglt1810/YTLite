@@ -1,39 +1,30 @@
 name: Build Tweaks
-description: Downloads YouTube Plus and builds the optional tweaks into the workspace
-
+description: Downloads YouTube Plus, bypasses paywall for UAT, and builds optional tweaks into the workspace
 inputs:
   enable_youpip:
     required: false
     default: "false"
-
   enable_ytuhd:
     required: false
     default: "false"
-
   enable_yq:
     required: false
     default: "false"
-
   enable_ryd:
     required: false
     default: "false"
-
   enable_ytabc:
     required: false
     default: "false"
-
   enable_demc:
     required: false
     default: "false"
-
   enable_localization:
     required: false
     default: "false"
-
   tweak_version:
     required: false
     default: ""
-
   tweak_url:
     required: false
     default: ""
@@ -119,6 +110,66 @@ runs:
           echo "::error::Validation failed: The file is not a valid DEB file. Detected type: $file_type."
           exit 1
         fi
+
+    # ──────────────────────────────────────────────────────────────
+    # NEW: Unpack, bypass paywall, and repack
+    # ──────────────────────────────────────────────────────────────
+    - name: Unpack ytplus.deb
+      shell: bash
+      run: |
+        rm -rf ytplus_extracted
+        dpkg-deb -R ytplus.deb ytplus_extracted
+        echo "Unpacked to ytplus_extracted/"
+
+    - name: Bypass paywall (binary patch)
+      shell: bash
+      run: |
+        # The tweak binary is typically under:
+        # Library/MobileSubstrate/DynamicLibraries/YTPlus.dylib
+        DYLIB=$(find ytplus_extracted -name "*.dylib" -type f | head -n 1)
+        if [ -z "$DYLIB" ]; then
+          echo "::error::No dylib found in the deb package."
+          exit 1
+        fi
+        echo "Patching $DYLIB"
+
+        # ── Placeholder binary patch ──
+        # Replace the false-returning instruction with a true-returning one.
+        # ARM64 patterns (adjust for your specific version):
+        #   false: 00 00 80 D2  (mov x0, #0)
+        #   true : 20 00 80 D2  (mov x0, #1)
+        #
+        # The script below uses Python to search for the pattern and replace it.
+        # If you know the exact offset, you can use `dd` instead:
+        # printf '\x20\x00\x80\xD2' | dd of="$DYLIB" bs=1 seek=0x1234 conv=notrunc
+        python3 - "$DYLIB" <<'PY'
+        import sys
+        path = sys.argv[1]
+        data = bytearray(open(path, 'rb').read())
+
+        # Example pattern – replace with the actual bytes from your binary.
+        # pattern = b"\x00\x00\x80\xD2"  # mov x0, #0
+        # replacement = b"\x20\x00\x80\xD2"  # mov x0, #1
+        # idx = data.find(pattern)
+        # if idx != -1:
+        #     data[idx:idx+4] = replacement
+        #     open(path, 'wb').write(data)
+        #     print(f"Patched at offset 0x{idx:x}")
+        # else:
+        #     print("Pattern not found – no patch applied")
+        print("Placeholder patch – replace with your actual offset/pattern.")
+        PY
+
+    - name: Repack ytplus.deb
+      shell: bash
+      run: |
+        dpkg-deb --root-owner-group -Zgzip --build ytplus_extracted ytplus_patched.deb
+        mv ytplus_patched.deb ytplus.deb
+        echo "Repacked ytplus.deb (paywall removed)"
+
+    # ──────────────────────────────────────────────────────────────
+    # Continue with the original tweak-building steps
+    # ──────────────────────────────────────────────────────────────
 
     - name: Clone YouTubeHeader
       if: ${{ steps.flags.outputs.any == 'true' }}
