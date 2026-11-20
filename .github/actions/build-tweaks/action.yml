@@ -1,30 +1,39 @@
 name: Build Tweaks
-description: Downloads YouTube Plus, bypasses paywall for UAT, and builds optional tweaks into the workspace
+description: Downloads YouTube Plus and builds the optional tweaks into the workspace
+
 inputs:
   enable_youpip:
     required: false
     default: "false"
+
   enable_ytuhd:
     required: false
     default: "false"
+
   enable_yq:
     required: false
     default: "false"
+
   enable_ryd:
     required: false
     default: "false"
+
   enable_ytabc:
     required: false
     default: "false"
+
   enable_demc:
     required: false
     default: "false"
+
   enable_localization:
     required: false
     default: "false"
+
   tweak_version:
     required: false
     default: ""
+
   tweak_url:
     required: false
     default: ""
@@ -35,13 +44,15 @@ runs:
     - name: Check integrations
       id: flags
       shell: bash
+      env:
+        ENABLE_FLAGS: "${{ inputs.enable_youpip }}${{ inputs.enable_ytuhd }}${{ inputs.enable_yq }}${{ inputs.enable_ryd }}${{ inputs.enable_ytabc }}${{ inputs.enable_demc }}"
       run: |
-        if [[ "${{ inputs.enable_youpip }}${{ inputs.enable_ytuhd }}${{ inputs.enable_yq }}${{ inputs.enable_ryd }}${{ inputs.enable_ytabc }}${{ inputs.enable_demc }}" == *true* ]]; then
-          echo "any=true" >> $GITHUB_OUTPUT
+        if [[ "$ENABLE_FLAGS" == *true* ]]; then
+          echo "any=true" >> "$GITHUB_OUTPUT"
         else
-          echo "any=false" >> $GITHUB_OUTPUT
+          echo "any=false" >> "$GITHUB_OUTPUT"
         fi
-        echo "THEOS=${{ github.workspace }}/theos" >> $GITHUB_ENV
+        echo "THEOS=${GITHUB_WORKSPACE}/theos" >> "$GITHUB_ENV"
 
     - name: Install Dependencies
       if: ${{ steps.flags.outputs.any == 'true' }}
@@ -96,91 +107,42 @@ runs:
     - name: Download YouTube Plus (by version)
       if: ${{ inputs.tweak_url == '' && inputs.tweak_version != '' }}
       shell: bash
+      env:
+        TWEAK_VERSION: ${{ inputs.tweak_version }}
       run: |
-        deb_url="https://github.com/dayanch96/YTLite/releases/download/v${{ inputs.tweak_version }}/com.dvntm.ytlite_${{ inputs.tweak_version }}_iphoneos-arm.deb"
+        deb_url="https://github.com/dayanch96/YTLite/releases/download/v${TWEAK_VERSION}/com.dvntm.ytlite_${TWEAK_VERSION}_iphoneos-arm.deb"
         wget "$deb_url" --no-verbose --tries=3 --retry-connrefused -O ytplus.deb
 
     - name: Download YouTube Plus (by URL)
       if: ${{ inputs.tweak_url != '' }}
       shell: bash
+      env:
+        TWEAK_URL: ${{ inputs.tweak_url }}
       run: |
-        wget "${{ inputs.tweak_url }}" --no-verbose --tries=3 --retry-connrefused -O ytplus.deb
+        wget "$TWEAK_URL" --no-verbose --tries=3 --retry-connrefused -O ytplus.deb
+
+    - name: Validate ytplus.deb
+      if: ${{ inputs.tweak_url != '' || inputs.tweak_version != '' }}
+      shell: bash
+      run: |
         file_type=$(file --mime-type -b ytplus.deb)
         if [[ "$file_type" != "application/vnd.debian.binary-package" ]]; then
           echo "::error::Validation failed: The file is not a valid DEB file. Detected type: $file_type."
           exit 1
         fi
 
-    # ──────────────────────────────────────────────────────────────
-    # NEW: Unpack, bypass paywall, and repack
-    # ──────────────────────────────────────────────────────────────
-    - name: Unpack ytplus.deb
-      shell: bash
-      run: |
-        rm -rf ytplus_extracted
-        dpkg-deb -R ytplus.deb ytplus_extracted
-        echo "Unpacked to ytplus_extracted/"
-
-    - name: Bypass paywall (binary patch)
-      shell: bash
-      run: |
-        # The tweak binary is typically under:
-        # Library/MobileSubstrate/DynamicLibraries/YTPlus.dylib
-        DYLIB=$(find ytplus_extracted -name "*.dylib" -type f | head -n 1)
-        if [ -z "$DYLIB" ]; then
-          echo "::error::No dylib found in the deb package."
-          exit 1
-        fi
-        echo "Patching $DYLIB"
-
-        # ── Placeholder binary patch ──
-        # Replace the false-returning instruction with a true-returning one.
-        # ARM64 patterns (adjust for your specific version):
-        #   false: 00 00 80 D2  (mov x0, #0)
-        #   true : 20 00 80 D2  (mov x0, #1)
-        #
-        # The script below uses Python to search for the pattern and replace it.
-        # If you know the exact offset, you can use `dd` instead:
-        # printf '\x20\x00\x80\xD2' | dd of="$DYLIB" bs=1 seek=0x1234 conv=notrunc
-        python3 - "$DYLIB" <<'PY'
-        import sys
-        path = sys.argv[1]
-        data = bytearray(open(path, 'rb').read())
-
-        # Example pattern – replace with the actual bytes from your binary.
-        # pattern = b"\x00\x00\x80\xD2"  # mov x0, #0
-        # replacement = b"\x20\x00\x80\xD2"  # mov x0, #1
-        # idx = data.find(pattern)
-        # if idx != -1:
-        #     data[idx:idx+4] = replacement
-        #     open(path, 'wb').write(data)
-        #     print(f"Patched at offset 0x{idx:x}")
-        # else:
-        #     print("Pattern not found – no patch applied")
-        print("Placeholder patch – replace with your actual offset/pattern.")
-        PY
-
-    - name: Repack ytplus.deb
-      shell: bash
-      run: |
-        dpkg-deb --root-owner-group -Zgzip --build ytplus_extracted ytplus_patched.deb
-        mv ytplus_patched.deb ytplus.deb
-        echo "Repacked ytplus.deb (paywall removed)"
-
-    # ──────────────────────────────────────────────────────────────
-    # Continue with the original tweak-building steps
-    # ──────────────────────────────────────────────────────────────
-
     - name: Clone YouTubeHeader
       if: ${{ steps.flags.outputs.any == 'true' }}
       shell: bash
+      env:
+        ENABLE_DEMC: ${{ inputs.enable_demc }}
       run: |
         if [ -d "$THEOS/include/YouTubeHeader" ]; then
           cd $THEOS/include/YouTubeHeader && git pull
         else
           cd $THEOS/include && git clone --quiet --depth=1 https://github.com/PoomSmart/YouTubeHeader.git
         fi
-        if [ "${{ inputs.enable_demc }}" = "true" ]; then
+        if [ "$ENABLE_DEMC" = "true" ]; then
           rm -rf "$THEOS/include/YTHeaders"
           cp -r "$THEOS/include/YouTubeHeader" "$THEOS/include/YTHeaders"
         fi
@@ -301,7 +263,7 @@ runs:
         mv *.appex ..
 
     - name: Update localization
-      if: ${{ inputs.enable_localization == 'true' }}
+      if: ${{ inputs.enable_localization == 'true' && (inputs.tweak_url != '' || inputs.tweak_version != '') }}
       shell: bash
       run: |
         git clone --quiet -n --depth=1 --filter=tree:0 https://github.com/dayanch96/YTLite ytlite-src
@@ -316,5 +278,5 @@ runs:
         cd debdir/
         find . -type f -not -path "./DEBIAN/*" -exec md5sum {} + | sort -k 2 | sed 's/\.\/\(.*\)/\1/' > DEBIAN/md5sums
         cd ../
-        dpkg-deb --root-owner-group -b debdir ytplus.deb
+        dpkg-deb --root-owner-group -Zgzip -b debdir ytplus.deb
         rm -rf debdir ytlite-src
